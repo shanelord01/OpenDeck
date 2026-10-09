@@ -27,6 +27,23 @@ fn extract_average_colour(img: &image::DynamicImage) -> (u8, u8, u8) {
 	((r_sum / count) as u8, (g_sum / count) as u8, (b_sum / count) as u8)
 }
 
+/// Place an encoder's 200x100 image on the device's LCD, returning the x offset to write it at.
+/// The Stream Deck+ strip has a 200x100 zone per encoder; the Galleon 100 SD's 720x384 screen is
+/// split into one half per encoder, so the image is scaled to the half's width and centred vertically.
+fn encoder_region(kind: Kind, position: u8, img: image::DynamicImage) -> (u16, image::DynamicImage) {
+	if kind != Kind::Galleon100Sd {
+		return (position as u16 * 200, img);
+	}
+	let Some((width, height)) = kind.lcd_strip_size() else {
+		return (position as u16 * 200, img);
+	};
+	let segment_width = width / kind.encoder_count() as usize;
+	let scaled = img.resize_exact(segment_width as u32, segment_width as u32 / 2, image::imageops::FilterType::Lanczos3);
+	let mut segment = image::DynamicImage::new_rgb8(segment_width as u32, height as u32);
+	image::imageops::overlay(&mut segment, &scaled, 0, (height as i64 - scaled.height() as i64) / 2);
+	(position as u16 * segment_width as u16, segment)
+}
+
 pub async fn update_image(context: &crate::shared::Context, image: Option<&str>) -> Result<(), anyhow::Error> {
 	if let Some(device) = ELGATO_DEVICES.read().await.get(&context.device) {
 		let kind = device.kind();
@@ -40,7 +57,7 @@ pub async fn update_image(context: &crate::shared::Context, image: Option<&str>)
 			let data = image.split_once(',').unwrap().1;
 			let bytes = base64::engine::general_purpose::STANDARD.decode(data)?;
 			if context.controller == "Encoder" {
-				let mut img = generate_encoder_image(context, &bytes).await?;
+				let (x, mut img) = encoder_region(kind, context.position, generate_encoder_image(context, &bytes).await?);
 				let Some(format) = device.kind().lcd_image_format() else {
 					return Err(anyhow::anyhow!("Failed to get LCD image format"));
 				};
@@ -50,7 +67,7 @@ pub async fn update_image(context: &crate::shared::Context, image: Option<&str>)
 					ImageRotation::Rot180 => img.rotate180(),
 					ImageRotation::Rot270 => img.rotate270(),
 				};
-				device.write_lcd(context.position as u16 * 200, 0, &ImageRect::from_image_async(img)?).await?;
+				device.write_lcd(x, 0, &ImageRect::from_image_for_kind_async(kind, img)?).await?;
 			} else if context.controller == "Infobar" {
 				let img = image::load_from_memory(&bytes)?;
 				let Some(format) = device.kind().lcd_image_format() else {
@@ -65,7 +82,7 @@ pub async fn update_image(context: &crate::shared::Context, image: Option<&str>)
 				device.set_button_image(context.position, image::load_from_memory(&bytes)?).await?;
 			}
 		} else if context.controller == "Encoder" {
-			let mut img = image::DynamicImage::new_rgb8(200, 100);
+			let (x, mut img) = encoder_region(kind, context.position, image::DynamicImage::new_rgb8(200, 100));
 			let Some(format) = device.kind().lcd_image_format() else {
 				return Err(anyhow::anyhow!("Failed to get LCD image format"));
 			};
@@ -75,7 +92,7 @@ pub async fn update_image(context: &crate::shared::Context, image: Option<&str>)
 				ImageRotation::Rot180 => img.rotate180(),
 				ImageRotation::Rot270 => img.rotate270(),
 			};
-			device.write_lcd(context.position as u16 * 200, 0, &ImageRect::from_image_async(img)?).await?;
+			device.write_lcd(x, 0, &ImageRect::from_image_for_kind_async(kind, img)?).await?;
 		} else if context.controller == "Infobar" {
 			let Some(format) = device.kind().lcd_image_format() else {
 				return Err(anyhow::anyhow!("Failed to get LCD image format"));
@@ -144,8 +161,13 @@ async fn init(device: AsyncStreamDeck, device_id: String) {
 		return;
 	}
 
-	let device_name = device.product().await.unwrap();
 	let kind = device.kind();
+	// The Galleon 100 SD's Stream Deck component reports its USB product string as "K100 MK2".
+	let device_name = if kind == Kind::Galleon100Sd {
+		"Galleon 100 SD".to_owned()
+	} else {
+		device.product().await.unwrap()
+	};
 	let device_type = match kind {
 		Kind::Original | Kind::OriginalV2 | Kind::Mk2 | Kind::Mk2Scissor | Kind::Mk2Module => 0,
 		Kind::Mini | Kind::MiniMk2 | Kind::MiniDiscord | Kind::MiniMk2Module => 1,
@@ -153,6 +175,7 @@ async fn init(device: AsyncStreamDeck, device_id: String) {
 		Kind::Pedal => 5,
 		Kind::Plus => 7,
 		Kind::Neo => 9,
+		Kind::Galleon100Sd => 12,
 		Kind::PlusXl => 13,
 	};
 
