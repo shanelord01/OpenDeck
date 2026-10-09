@@ -44,6 +44,62 @@ fn encoder_region(kind: Kind, position: u8, img: image::DynamicImage) -> (u16, i
 	(position as u16 * segment_width as u16, segment)
 }
 
+/// The Galleon 100 SD's physical layout: two dials above the 720x384 screen, then four rows of
+/// three keys, with each dial centred over an outer key column. Measured in the module's own
+/// pixels and drawn at 11/30 of that size, which is about the size of other devices in the editor.
+fn galleon_layout() -> crate::shared::DeviceLayout {
+	use crate::shared::{DeviceLayout, DeviceLayoutCanvas, DeviceLayoutControl, DeviceLayoutSurface, DeviceLayoutSurfaceKind};
+
+	const fn scaled(module_pixels: u16) -> u16 {
+		module_pixels * 11 / 30
+	}
+	const KEY: u16 = scaled(160);
+	const GAP: u16 = scaled(64);
+	const LEFT: u16 = scaled(56);
+	const SCREEN_GAP: u16 = scaled(59);
+	const SCREEN_WIDTH: u16 = scaled(720);
+	const SCREEN_HEIGHT: u16 = scaled(384);
+	const SCREEN_TOP: u16 = KEY + SCREEN_GAP;
+	const KEYS_TOP: u16 = SCREEN_TOP + SCREEN_HEIGHT + SCREEN_GAP;
+
+	let dials = (0..2).map(|i| DeviceLayoutControl::Circle {
+		controller: "Encoder".to_owned(),
+		position: i,
+		cx: LEFT + KEY / 2 + i as u16 * 2 * (KEY + GAP),
+		cy: KEY / 2,
+		r: KEY / 2,
+		surface: None,
+	});
+	let keys = (0..12u8).map(|i| DeviceLayoutControl::Rect {
+		controller: "Keypad".to_owned(),
+		position: i,
+		x: LEFT + (i as u16 % 3) * (KEY + GAP),
+		y: KEYS_TOP + (i as u16 / 3) * (KEY + GAP),
+		width: KEY,
+		height: KEY,
+		surface: None,
+	});
+
+	DeviceLayout {
+		canvas: DeviceLayoutCanvas {
+			width: SCREEN_WIDTH,
+			height: KEYS_TOP + 4 * KEY + 3 * GAP,
+			unit: Some("px".to_owned()),
+		},
+		surfaces: vec![DeviceLayoutSurface {
+			id: "screen".to_owned(),
+			kind: Some(DeviceLayoutSurfaceKind::Display),
+			x: 0,
+			y: SCREEN_TOP,
+			width: SCREEN_WIDTH,
+			height: SCREEN_HEIGHT,
+			pixel_width: Some(720),
+			pixel_height: Some(384),
+		}],
+		controls: dials.chain(keys).collect(),
+	}
+}
+
 pub async fn update_image(context: &crate::shared::Context, image: Option<&str>) -> Result<(), anyhow::Error> {
 	if let Some(device) = ELGATO_DEVICES.read().await.get(&context.device) {
 		let kind = device.kind();
@@ -198,8 +254,8 @@ async fn init(device: AsyncStreamDeck, device_id: String) {
 					infobars: if kind == Kind::Neo { 1 } else { 0 },
 					r#type: device_type,
 				},
-				layout_version: None,
-				layout: None,
+				layout_version: (kind == Kind::Galleon100Sd).then_some(crate::shared::DEVICE_LAYOUT_VERSION),
+				layout: (kind == Kind::Galleon100Sd).then(galleon_layout),
 			},
 		},
 	)
